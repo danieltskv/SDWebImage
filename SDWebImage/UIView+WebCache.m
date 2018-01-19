@@ -13,7 +13,10 @@
 #import "objc/runtime.h"
 #import "UIView+WebCacheOperation.h"
 
-NSString * const SDWebImageInternalSetImageInGlobalQueueKey = @"setImageInGlobalQueue";
+NSString * const SDWebImageInternalSetImageGroupKey = @"internalSetImageGroup";
+NSString * const SDWebImageExternalCustomManagerKey = @"externalCustomManager";
+
+const int64_t SDWebImageProgressUnitCountUnknown = 1LL;
 
 static char imageURLKey;
 
@@ -27,6 +30,19 @@ static char TAG_ACTIVITY_SHOW;
 
 - (nullable NSURL *)sd_imageURL {
     return objc_getAssociatedObject(self, &imageURLKey);
+}
+
+- (NSProgress *)sd_imageProgress {
+    NSProgress *progress = objc_getAssociatedObject(self, @selector(sd_imageProgress));
+    if (!progress) {
+        progress = [[NSProgress alloc] initWithParent:nil userInfo:nil];
+        self.sd_imageProgress = progress;
+    }
+    return progress;
+}
+
+- (void)setSd_imageProgress:(NSProgress *)sd_imageProgress {
+    objc_setAssociatedObject(self, @selector(sd_imageProgress), sd_imageProgress, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 - (void)sd_internalSetImageWithURL:(nullable NSURL *)url
@@ -52,6 +68,10 @@ static char TAG_ACTIVITY_SHOW;
     objc_setAssociatedObject(self, &imageURLKey, url, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
     if (!(options & SDWebImageDelayPlaceholder)) {
+        if ([context valueForKey:SDWebImageInternalSetImageGroupKey]) {
+            dispatch_group_t group = [context valueForKey:SDWebImageInternalSetImageGroupKey];
+            dispatch_group_enter(group);
+        }
         dispatch_main_async_safe(^{
             [self sd_setImage:placeholder imageData:nil basedOnClassOrViaCustomSetImageBlock:setImageBlock];
         });
@@ -63,11 +83,34 @@ static char TAG_ACTIVITY_SHOW;
             [self sd_addActivityIndicator];
         }
         
+        // reset the progress
+        self.sd_imageProgress.totalUnitCount = 0;
+        self.sd_imageProgress.completedUnitCount = 0;
+        
+        SDWebImageManager *manager;
+        if ([context valueForKey:SDWebImageExternalCustomManagerKey]) {
+            manager = (SDWebImageManager *)[context valueForKey:SDWebImageExternalCustomManagerKey];
+        } else {
+            manager = [SDWebImageManager sharedManager];
+        }
+        
         __weak __typeof(self)wself = self;
-        id <SDWebImageOperation> operation = [SDWebImageManager.sharedManager loadImageWithURL:url options:options progress:progressBlock completed:^(UIImage *image, NSData *data, NSError *error, SDImageCacheType cacheType, BOOL finished, NSURL *imageURL) {
+        SDWebImageDownloaderProgressBlock combinedProgressBlock = ^(NSInteger receivedSize, NSInteger expectedSize, NSURL * _Nullable targetURL) {
+            wself.sd_imageProgress.totalUnitCount = expectedSize;
+            wself.sd_imageProgress.completedUnitCount = receivedSize;
+            if (progressBlock) {
+                progressBlock(receivedSize, expectedSize, targetURL);
+            }
+        };
+        id <SDWebImageOperation> operation = [manager loadImageWithURL:url options:options progress:combinedProgressBlock completed:^(UIImage *image, NSData *data, NSError *error, SDImageCacheType cacheType, BOOL finished, NSURL *imageURL) {
             __strong __typeof (wself) sself = wself;
-            [sself sd_removeActivityIndicator];
             if (!sself) { return; }
+            [sself sd_removeActivityIndicator];
+            // if the progress not been updated, mark it to complete state
+            if (finished && !error && sself.sd_imageProgress.totalUnitCount == 0 && sself.sd_imageProgress.completedUnitCount == 0) {
+                sself.sd_imageProgress.totalUnitCount = SDWebImageProgressUnitCountUnknown;
+                sself.sd_imageProgress.completedUnitCount = SDWebImageProgressUnitCountUnknown;
+            }
             BOOL shouldCallCompletedBlock = finished || (options & SDWebImageAvoidAutoSetImage);
             BOOL shouldNotSetImage = ((image && (options & SDWebImageAvoidAutoSetImage)) ||
                                       (!image && !(options & SDWebImageDelayPlaceholder)));
@@ -100,16 +143,23 @@ static char TAG_ACTIVITY_SHOW;
                 targetImage = placeholder;
                 targetData = nil;
             }
-            BOOL shouldUseGlobalQueue = NO;
-            if (context && [context valueForKey:SDWebImageInternalSetImageInGlobalQueueKey]) {
-                shouldUseGlobalQueue = [[context valueForKey:SDWebImageInternalSetImageInGlobalQueueKey] boolValue];
-            }
-            dispatch_queue_t targetQueue = shouldUseGlobalQueue ? dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0) : dispatch_get_main_queue();
             
-            dispatch_queue_async_safe(targetQueue, ^{
-                [sself sd_setImage:targetImage imageData:targetData basedOnClassOrViaCustomSetImageBlock:setImageBlock];
-                dispatch_main_async_safe(callCompletedBlockClojure);
-            });
+            if ([context valueForKey:SDWebImageInternalSetImageGroupKey]) {
+                dispatch_group_t group = [context valueForKey:SDWebImageInternalSetImageGroupKey];
+                dispatch_group_enter(group);
+                dispatch_main_async_safe(^{
+                    [sself sd_setImage:targetImage imageData:targetData basedOnClassOrViaCustomSetImageBlock:setImageBlock];
+                });
+                // ensure completion block is called after custom setImage process finish
+                dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+                    callCompletedBlockClojure();
+                });
+            } else {
+                dispatch_main_async_safe(^{
+                    [sself sd_setImage:targetImage imageData:targetData basedOnClassOrViaCustomSetImageBlock:setImageBlock];
+                    callCompletedBlockClojure();
+                });
+            }
         }];
         [self sd_setImageLoadOperation:operation forKey:validOperationKey];
     } else {

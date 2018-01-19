@@ -38,7 +38,7 @@ typedef NSMutableDictionary<NSString *, id> SDCallbacksDictionary;
 
 @property (strong, nonatomic, readwrite, nullable) NSURLSessionTask *dataTask;
 
-@property (SDDispatchQueueSetterSementics, nonatomic, nullable) dispatch_queue_t barrierQueue;
+@property (strong, nonatomic, nullable) dispatch_queue_t barrierQueue;
 
 #if SD_UIKIT
 @property (assign, nonatomic) UIBackgroundTaskIdentifier backgroundTaskId;
@@ -72,10 +72,6 @@ typedef NSMutableDictionary<NSString *, id> SDCallbacksDictionary;
         _barrierQueue = dispatch_queue_create("com.hackemist.SDWebImageDownloaderOperationBarrierQueue", DISPATCH_QUEUE_CONCURRENT);
     }
     return self;
-}
-
-- (void)dealloc {
-    SDDispatchQueueRelease(_barrierQueue);
 }
 
 - (nullable id)addHandlersForProgress:(nullable SDWebImageDownloaderProgressBlock)progressBlock
@@ -139,14 +135,6 @@ typedef NSMutableDictionary<NSString *, id> SDCallbacksDictionary;
             }];
         }
 #endif
-        if (self.options & SDWebImageDownloaderIgnoreCachedResponse) {
-            // Grab the cached data for later check
-            NSCachedURLResponse *cachedResponse = [[NSURLCache sharedURLCache] cachedResponseForRequest:self.request];
-            if (cachedResponse) {
-                self.cachedData = cachedResponse.data;
-            }
-        }
-        
         NSURLSession *session = self.unownedSession;
         if (!self.unownedSession) {
             NSURLSessionConfiguration *sessionConfig = [NSURLSessionConfiguration defaultSessionConfiguration];
@@ -161,6 +149,22 @@ typedef NSMutableDictionary<NSString *, id> SDCallbacksDictionary;
                                                               delegate:self
                                                          delegateQueue:nil];
             session = self.ownedSession;
+        }
+        
+        if (self.options & SDWebImageDownloaderIgnoreCachedResponse) {
+            // Grab the cached data for later check
+            NSURLCache *URLCache = session.configuration.URLCache;
+            if (!URLCache) {
+                URLCache = [NSURLCache sharedURLCache];
+            }
+            NSCachedURLResponse *cachedResponse;
+            // NSURLCache's `cachedResponseForRequest:` is not thread-safe, see https://developer.apple.com/documentation/foundation/nsurlcache#2317483
+            @synchronized (URLCache) {
+                cachedResponse = [URLCache cachedResponseForRequest:self.request];
+            }
+            if (cachedResponse) {
+                self.cachedData = cachedResponse.data;
+            }
         }
         
         self.dataTask = [session dataTaskWithRequest:self.request];
@@ -423,7 +427,8 @@ didReceiveResponse:(NSURLResponse *)response
                             image = [[SDWebImageCodersManager sharedInstance] decompressedImageWithImage:image data:&imageData options:@{SDWebImageCoderScaleDownLargeImagesKey: @(shouldScaleDown)}];
                         }
                     }
-                    if (CGSizeEqualToSize(image.size, CGSizeZero)) {
+                    CGSize imageSize = image.size;
+                    if (imageSize.width == 0 || imageSize.height == 0) {
                         [self callCompletionBlocksWithError:[NSError errorWithDomain:SDWebImageErrorDomain code:0 userInfo:@{NSLocalizedDescriptionKey : @"Downloaded image has 0 pixels"}]];
                     } else {
                         [self callCompletionBlocksWithImage:image imageData:imageData error:nil finished:YES];
