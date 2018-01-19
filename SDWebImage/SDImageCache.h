@@ -156,6 +156,8 @@ typedef void(^SDWebImageCalculateSizeBlock)(NSUInteger fileCount, NSUInteger tot
  */
 - (void)diskImageExistsWithKey:(nullable NSString *)key completion:(nullable SDWebImageCheckCacheCompletionBlock)completionBlock;
 
+- (BOOL)diskImageExistsWithKey:(nullable NSString *)key;
+
 /**
  * Operation that queries the cache asynchronously and call the completion when done.
  *
