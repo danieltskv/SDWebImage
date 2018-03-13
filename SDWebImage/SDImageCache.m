@@ -175,7 +175,7 @@ FOUNDATION_STATIC_INLINE NSUInteger SDCacheCostForImage(UIImage *image) {
         }
 
         dispatch_sync(_ioQueue, ^{
-            _fileManager = [NSFileManager new];
+            self.fileManager = [NSFileManager new];
         });
 
 #if SD_UIKIT
@@ -412,7 +412,6 @@ FOUNDATION_STATIC_INLINE NSUInteger SDCacheCostForImage(UIImage *image) {
         if (imageData) {
             return imageData;
         }
-
     }
 
     return nil;
